@@ -3,6 +3,7 @@ import glob
 import torch
 import numpy as np
 from torch.utils.data import Dataset, IterableDataset
+import random
 
 class ShardDataset(Dataset):
     def __init__(self, shard_dir, split, seq_len, use_loss_mask=False):
@@ -29,18 +30,27 @@ class ShardDataset(Dataset):
         return chunk[:-1], chunk[1:]
 
 class StreamingShardDataset(IterableDataset):
-    def __init__(self, shard_dir, split, seq_len, use_loss_mask=False):
+    def __init__(self, shard_dir, split, seq_len):
         self.shard_dir = shard_dir
         self.split = split
         self.seq_len = seq_len
-        self.shard_files = sorted(glob.glob(os.path.join(shard_dir, f"{split}_*.bin")))
+        self.shard_files = glob.glob(os.path.join(shard_dir, f"{split}_*.bin"))
 
     def __iter__(self):
-        for shard_file in self.shard_files:
-            # Stream directly from binary file
+        # 1. Shuffle shard order every time we start a new epoch
+        shuffled_shards = self.shard_files[:]
+        random.shuffle(shuffled_shards)
+
+        for shard_file in shuffled_shards:
             data = np.fromfile(shard_file, dtype=np.uint16)
             num_samples = len(data) // (self.seq_len + 1)
-            for i in range(num_samples):
+            
+            # 2. Create a list of all start indices in this shard
+            indices = list(range(num_samples))
+            # 3. Shuffle the indices so we don't read the shard linearly
+            random.shuffle(indices)
+
+            for i in indices:
                 start = i * self.seq_len
                 end = start + self.seq_len + 1
                 chunk = torch.from_numpy(data[start:end].astype(np.int64))
