@@ -30,7 +30,7 @@ class ShardDataset(Dataset):
         return chunk[:-1], chunk[1:]
 
 class StreamingShardDataset(IterableDataset):
-    def __init__(self, shard_dir, split, seq_len):
+    def __init__(self, shard_dir, split, seq_len, use_loss_mask=False):
         self.shard_dir = shard_dir
         self.split = split
         self.seq_len = seq_len
