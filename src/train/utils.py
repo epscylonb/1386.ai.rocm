@@ -36,7 +36,12 @@ def save_checkpoint(
 
 def load_checkpoint(path: str, model: torch.nn.Module, optimizer: torch.optim.Optimizer | None = None):
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
-    model.load_state_dict(ckpt["model_state_dict"])
+    # Inside load_checkpoint in utils.py
+    state_dict = ckpt["model_state_dict"]
+    # Strip the '_orig_mod.' prefix added by torch.compile
+    new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+    model.load_state_dict(new_state_dict)
+    #model.load_state_dict(ckpt["model_state_dict"])
     if optimizer is not None and "optimizer_state_dict" in ckpt:
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     return ckpt.get("step", 0), ckpt.get("config", {})

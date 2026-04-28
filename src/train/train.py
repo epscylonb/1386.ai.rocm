@@ -85,8 +85,8 @@ def main():
     loader = DataLoader(
         dataset,
         batch_size=train_cfg["micro_batch_size"],
-        num_workers=2,
-        pin_memory=True,
+        num_workers=0,
+        pin_memory=False,
         drop_last=True,
     )
 
@@ -121,6 +121,8 @@ def main():
     print(f"  Ckpt prefix:     {ckpt_prefix}")
     print()
 
+    # Force the triton backend for ROCm/Strix Halo stability
+    model = torch.compile(model, backend="inductor")
     model.train()
     data_iter = iter(loader)
     step = start_step
