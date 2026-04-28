@@ -1,3 +1,45 @@
+# 1386.ai.rocm
+
+This is a fork of [1386.ai](https://github.com/eb1386/1386.ai) ported to **ROCm**, targeting specifically the AMD Strix Halo APU but compatible with any ROCm-supported hardware.
+
+I found this repo through a Reddit post where the author (@eb1386) nonchalantly announced it after training a 235M-parameter model. Unlike most toy LLM implementations, this one is end-to-end — data prep, training, and fine-tuning included. The code is clean and accessible, making it an excellent reference for small-model training. Sadly the author has deleted their original post and comments, but you can see [others' feedback here](https://www.reddit.com/r/LocalLLaMA/comments/1srsxqs/235m_param_llm_from_scratch_on_a_single_rtx_5080/?show=original).
+
+Regarding ROCm support on Strix Halo, there's good news and bad news.
+
+The good news: despite ROCm's reputation lagging behind CUDA, virtually no PyTorch-specific code changes were needed to train a 500M-parameter model here. PyTorch's ROCm backend is genuinely solid.
+
+The bad news: training a 500M-parameter model on the 128 GB Strix Halo APU (in a GMKTec Evo X2 mini PC) will take roughly three weeks. I'm seeing ~4,750 tokens/s — there's likely not much low-hanging fruit left without writing custom CUDA kernels or deeper fused-operator optimizations.
+
+## Summary of Changes
+
+- dataset.py
+    - The original author omitted `ShardDataset` and `StreamingShardDataset` classes, so I have naively implemented these
+    - Random shuffling of training data has been added to ensure that the model isn't trained on previously seen data when resuming training from a checkpoint
+- `torch.compile`
+    - Added to increase training perf
+- Training workers changed from 2 to 0 (running on the main thread)
+    - Couldn't get training to start using workers
+- Added a `Dockerfile` and `run-docker.sh` helper script
+    - ROCm drivers and libraries are notoriously difficult to install, configure, and maintain
+    - Using a container avoids breaking the host with bad installs and config
+    - Using the latest image from [https://hub.docker.com/r/rocm/pytorch/tags](rocm/pytorch)  
+
+## Quick Start on Strix Halo
+
+Consider editing the ENV vars in the `run-docker.sh` script to match your hardware and huggingface config.
+
+```bash
+# Build the image (base is > 6 GB)
+docker build -t 1386-rocm .
+
+# Run an interactive session:
+bash run-docker.sh
+```
+
+Inside the container, follow the original instructions to download data and begin training.
+
+What follows is the original readme from the forked repo.
+
 # 1386.ai
 
 A lightweight transformer language model built from scratch in PyTorch, trained on a single consumer GPU with a full pipeline for data processing, pretraining, and instruction tuning.
