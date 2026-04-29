@@ -41,6 +41,11 @@ class StreamingShardDataset(IterableDataset):
         shuffled_shards = self.shard_files[:]
         random.shuffle(shuffled_shards)
 
+        # Distribute shards among workers to avoid duplicate data in multi-process loading
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            shuffled_shards = shuffled_shards[worker_info.id::worker_info.num_workers]
+
         for shard_file in shuffled_shards:
             data = np.fromfile(shard_file, dtype=np.uint16)
             num_samples = len(data) // (self.seq_len + 1)
