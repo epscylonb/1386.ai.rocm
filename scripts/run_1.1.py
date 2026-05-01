@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT))
 # paths
 RAW_DIR          = ROOT / "data" / "raw_1.1"
 SCORED_DIR       = ROOT / "data" / "scored_1.1"
+AUGMENTED_DIR    = ROOT / "data" / "augmented_1.1"
 DEDUPED_DIR      = ROOT / "data" / "deduped_1.1"
 PRETRAIN_SHARDS  = ROOT / "data" / "shards_1.1"
 INSTRUCT_SHARDS  = ROOT / "data" / "instruct_shards_1.1"
@@ -34,9 +35,9 @@ LOG_DIR          = ROOT / "logs"
 
 PRETRAIN_CFG     = ROOT / "configs" / "pretrain_1.1.yaml"
 FINETUNE_CFG     = ROOT / "configs" / "finetune_1.1.yaml"
+LLM_CFG          = ROOT / "configs" / "llm_1.1.yaml"
 
 SEQ_LEN = 1024
-
 # data targets (chars)
 FINEWEB_TARGET    = 30_000_000_000
 WIKI_TARGET       = 6_000_000_000
@@ -97,11 +98,11 @@ def stage_download():
         print("ERROR: pip install datasets")
         sys.exit(1)
 
-    _download_fineweb(load_dataset)
-    _download_wikipedia(load_dataset)
+    #_download_fineweb(load_dataset)
+    #_download_wikipedia(load_dataset)
     _download_stackexchange(load_dataset)
     _download_code(load_dataset)
-    _download_arxiv(load_dataset)
+    #_download_arxiv(load_dataset)
 
     print(f"\n{'─' * 40}")
     print("Download summary:")
@@ -205,7 +206,8 @@ def _download_stackexchange(load_dataset):
     t0 = time.time()
 
     try:
-        ds = load_dataset("HuggingFaceTB/stack-exchange-preferences",
+        #ds = load_dataset("HuggingFaceTB/stack-exchange-preferences",
+        ds = load_dataset("HuggingFaceTB/stack-edu",
                           split="train", streaming=True, trust_remote_code=True)
 
         with open(path, "w", encoding="utf-8") as f:
@@ -566,6 +568,228 @@ def stage_minhash_dedup():
 
 
 # ── stage 4: train tokenizer ────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────
+def stage_augment():
+    """Enrich deduped documents with LLM-generated metadata.
+
+    For each document in the deduped sets, calls the LLM to generate:
+    - A concise summary
+    - Key points extracted from the content
+    - Related follow-up questions
+
+    Results are written to AUGMENTED_DIR alongside the original text,
+    so downstream tokenization gets both the raw content and enriched metadata.
+    """
+    banner("Stage 5: LLM data augmentation")
+
+    augmented_dir = AUGMENTED_DIR
+    augmented_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load LLM config
+    if not LLM_CFG.exists():
+        print(f"[skip] LLM config not found: {LLM_CFG}")
+        print("  Create it or skip the augmentation stage.")
+        return
+    llm_cfg = yaml.safe_load(LLM_CFG.read_text())
+    provider = llm_cfg.get("provider", "anthropic")
+    model = llm_cfg.get("model", "claude-sonnet-4-20250514")
+    max_tokens = llm_cfg.get("max_tokens", 1024)
+    batch_size = llm_cfg.get("batch_size", 10)
+    retry_delay = llm_cfg.get("retry_delay", 3.0)
+
+    api_key_name = llm_cfg.get("api_key_env", "ANTHROPIC_API_KEY")
+    if not os.environ.get(api_key_name):
+        print(f"{api_key_name} not set. Skipping augmentation.")
+        print(f"  Set: export {api_key_name}=sk-...")
+        print(f"  Provider: {provider}  Model: {model}")
+        return
+    print(f"  Provider: {provider}  Model: {model}")
+    print(f"  Batch size: {batch_size}  Max tokens: {max_tokens}")
+
+    ENRICH_SYS = (
+        "You are a data augmentation assistant. Produce clean, well-structured "
+        "enrichment content. Keep everything factual and concise. "
+        "Do NOT include any conversational filler or preambles. "
+        "Start directly with '# Summary'."
+    )
+    ENRICH_SEP = "\n\n--- Original document ---\n"
+
+    source_files = [
+        ("fineweb_edu_hq.txt", "fineweb_edu"),
+        ("wikipedia_clean.txt", "wikipedia"),
+        ("stackexchange_clean.txt", "stackexchange"),
+        ("code_clean.txt", "code"),
+        ("arxiv_clean.txt", "arxiv"),
+    ]
+
+    total_augmented = 0
+    total_failed = 0
+
+    for filename, prefix in source_files:
+        dedup_src = DEDUPED_DIR / filename
+        aug_dst_dir = augmented_dir / prefix
+        if not dedup_src.exists():
+            print(f"[skip] {filename} not in deduped set")
+            continue
+
+        aug_dst_dir.mkdir(parents=True, exist_ok=True)
+
+        # Read documents
+        docs, doc_ids = _read_documents(str(dedup_src))
+        print(f"\n{filename}: {len(docs)} documents")
+
+        if not docs:
+            continue
+
+        # Find already-augmented docs (by doc_id)
+        already = set()
+        for meta_f in aug_dst_dir.glob("*.jsonl.meta"):
+            try:
+                entry = json.loads(meta_f.read_text().strip())
+                already.add(entry["doc_id"])
+            except Exception:
+                already.add(meta_f.stem)
+        print(f"  Already augmented: {len(already)}")
+
+        # Filter to unprocessed docs
+        pending = [(doc_id, doc) for doc_id, doc in zip(doc_ids, docs)
+                   if doc_id not in already]
+        if not pending:
+            print("  All docs already augmented, skipping.")
+            continue
+
+        # Detect available provider
+        import anthropic as ap
+        import importlib.util
+
+        use_anthropic = importlib.util.find_spec("anthropic") is not None
+        use_openai    = importlib.util.find_spec("openai") is not None
+
+        if use_anthropic:
+            client = ap.Anthropic()
+            def _gen(prompts, cl=client, mod=model, t=max_tokens, sys_msg=ENRICH_SYS):
+                results = []
+                for p in prompts:
+                    try:
+                        msg = cl.messages.create(
+                            model=mod, max_tokens=t,
+                            system=sys_msg,
+                            messages=[{"role": "user", "content": p}],
+                        )
+                        txt = msg.content[0].text
+                        results.append(("OK", txt if txt else None))
+                    except Exception as e:
+                        print(f"    API error: {e}")
+                        results.append(("ERR", None))
+                return results
+        elif use_openai:
+            import openai
+            oai = openai.OpenAI()
+            def _gen(prompts, cl=oai, mod=model, t=max_tokens, sys_msg=ENRICH_SYS):
+                results = []
+                for p in prompts:
+                    try:
+                        msg = cl.chat.completions.create(
+                            model=mod, max_tokens=t,
+                            messages=[
+                                {"role": "system", "content": sys_msg},
+                                {"role": "user", "content": p},
+                            ],
+                        )
+                        txt = msg.choices[0].message.content
+                        results.append(("OK", txt if txt else None))
+                    except Exception as e:
+                        print(f"    API error: {e}")
+                        results.append(("ERR", None))
+                return results
+        else:
+            print("ERROR: Neither 'anthropic' nor 'openai' package found.")
+            print("  Install: pip install anthropic  (or: pip install openai)")
+            return
+
+        # Generate in batches
+        t0 = time.time()
+        n_generated = 0
+        n_batch = 0
+
+        for i in range(0, len(pending), batch_size):
+            batch = pending[i:i + batch_size]
+            batch_prompts = [_fmt_enrich_prompt(doc) for _, doc in batch]
+            batch_ids     = [doc_id for doc_id, _ in batch]
+
+            responses = _gen(batch_prompts)
+
+            # Write augmented documents
+            for did, (status, response) in zip(batch_ids, responses):
+                if status != "OK" or not response:
+                    total_failed += 1
+                    continue
+
+                doc_text = next(d for did_check, d in batch if did_check == did)
+
+                # Write enriched document: original text + augmentation appended
+                path = aug_dst_dir / f"{prefix}_{did:06d}.txt"
+                content = f"{doc_text}{ENRICH_SEP}{response}"
+                path.write_text(content, encoding="utf-8")
+
+                # Write sidecar metadata
+                meta_path = aug_dst_dir / f"{prefix}_{did:06d}.jsonl.meta"
+                json.dump({"doc_id": did, "source": prefix,
+                           "provider": provider, "model": model},
+                          meta_path.open("w"))
+
+                total_augmented += 1
+                n_generated += 1
+
+            dt = time.time() - t0
+            n_batch += 1
+            if n_batch % 10 == 0:
+                print(f"  {n_generated:,} enriched | {n_batch} batches | {dt:.0f}s")
+
+    print(f"\nAugmentation summary:")
+    print(f"  {total_augmented:,} documents enriched")
+    if total_failed:
+        print(f"  {total_failed:,} failed")
+    print(f"  Output: {augmented_dir}")
+    gc.collect()
+
+
+def _read_documents(path: str):
+    """Read NUL-separated documents from a text file."""
+    texts, ids = [], []
+    with open(path, "r", encoding="utf-8") as f:
+        doc_id = 0
+        current = []
+        for line in f:
+            current.append(line.rstrip("\n"))
+            if line.strip() == "" and len(current) > 1:
+                text = "\n".join(current).strip()
+                current = []
+                if len(text) >= 50:
+                    texts.append(text)
+                    ids.append(doc_id)
+                    doc_id += 1
+        if current:
+            text = "\n".join(current).strip()
+            if len(text) >= 50:
+                texts.append(text)
+                ids.append(doc_id)
+    return texts, ids
+
+
+def _fmt_enrich_prompt(text: str) -> str:
+    """Build the enrichment prompt for one document."""
+    return (
+        "For the following document, produce a quality-enriched version:\n"
+        "  1. A concise 1-2 sentence summary of the core idea.\n"
+        "  2. 3-5 key points as bullet points.\n"
+        "  3. 3-5 related follow-up questions.\n"
+        "Start directly with '# Summary' and include the original text verbatim\n"
+        "at the end after the separator '--- Original document ---'.\n\n"
+        f"--- Document ---\n{text}"
+    )
+
+
 def stage_train_tokenizer():
     banner("Stage 5: Train tokenizer")
 
@@ -1111,8 +1335,8 @@ def stage_test():
 def main():
     parser = argparse.ArgumentParser(description="Plasma 1.1 training pipeline")
     parser.add_argument("--stage", choices=[
-        "cleanup", "download", "classifiers", "quality", "dedup", "tokenizer",
-        "shards", "pretrain", "synthetic", "instruct", "finetune", "test",
+        "cleanup", "download", "classifiers", "quality", "dedup", "augment",
+        "tokenizer", "shards", "pretrain", "synthetic", "instruct", "finetune", "test",
     ], help="Run a specific stage")
     args = parser.parse_args()
 
@@ -1126,6 +1350,7 @@ def main():
         "classifiers": stage_train_classifiers,
         "quality":     stage_quality_score,
         "dedup":       stage_minhash_dedup,
+        "augment":     stage_augment,
         "tokenizer":   stage_train_tokenizer,
         "shards":      stage_mix_and_shard,
         "pretrain":    stage_pretrain,

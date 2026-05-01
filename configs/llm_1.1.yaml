@@ -1,0 +1,22 @@
+# Plasma 1.1 LLM configuration for data augmentation
+
+# LLM provider: "anthropic" or "openai"
+provider: anthropic
+
+# Claude model for augmentation
+model: claude-sonnet-4-20250514
+
+# Max response tokens per document (~800-1200 words)
+max_tokens: 1024
+
+# API key env var name
+api_key_env: ANTHROPIC_API_KEY
+
+# Prompt style: "quality_enrich" appends questions/summary/keywords to docs
+prompt_style: quality_enrich
+
+# Parallel batch size for API calls
+batch_size: 10
+
+# Retry on failure (seconds)
+retry_delay: 3
