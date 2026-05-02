@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT))
 RAW_DIR          = ROOT / "data" / "raw_1.1"
 SCORED_DIR       = ROOT / "data" / "scored_1.1"
 DEDUPED_DIR      = ROOT / "data" / "deduped_1.1"
+AUGMENTED_DIR    = ROOT / "data" / "augmented_1.1"
 PRETRAIN_SHARDS  = ROOT / "data" / "shards_1.1"
 INSTRUCT_SHARDS  = ROOT / "data" / "instruct_shards_1.1"
 TOKENIZER_OLD    = ROOT / "data" / "tokenizer_1.0.model"
@@ -479,8 +480,28 @@ def stage_quality_score():
               f"toxic: {toxic_dropped:,} | low-quality: {quality_dropped:,} | {elapsed_str(dt)}")
 
 
-# ── stage 3: minhash dedup ──────────────────────────────────────────
-def stage_minhash_dedup():
+def stage_augment():
+    banner("Stage 4.5: Augment documents")
+
+    # Use a config file for LLM settings
+    config_path = ROOT / "configs" / "llm_1.1.yaml"
+    if not config_path.exists():
+        print(f"ERROR: Config file {config_path} not found.")
+        sys.exit(1)
+
+    # Build the command
+    cmd = [
+        sys.executable, str(ROOT / "scripts" / "augment_openai.py"),
+        "--input-dir", str(DEDUPED_DIR),
+        "--output-dir", str(AUGMENTED_DIR),
+        "--config", str(config_path),
+    ]
+
+    print("Running augmentation stage...")
+    result = subprocess.run(cmd, cwd=str(ROOT))
+
+    if result.returncode != 0:
+        print(f"WARNING: Augmentation exited with code {result.returncode}")
     banner("Stage 4: MinHash dedup")
 
     DEDUPED_DIR.mkdir(parents=True, exist_ok=True)
@@ -632,6 +653,13 @@ def stage_mix_and_shard():
 
     for name, filename, weight in source_configs:
         path = DEDUPED_DIR / filename
+        if not path.exists() and not (AUGMENTED_DIR / filename).exists():
+             print(f"[skip] {filename} not found in deduped or augmented dir")
+             continue
+        
+        if (AUGMENTED_DIR / filename).exists():
+            path = AUGMENTED_DIR / filename
+            
         if path.exists() and path.stat().st_size > 0:
             sources.append(DataSource(name, path, weight))
 
@@ -1111,7 +1139,7 @@ def stage_test():
 def main():
     parser = argparse.ArgumentParser(description="Plasma 1.1 training pipeline")
     parser.add_argument("--stage", choices=[
-        "cleanup", "download", "classifiers", "quality", "dedup", "tokenizer",
+        "cleanup", "download", "classifiers", "quality", "dedup", "augment", "tokenizer",
         "shards", "pretrain", "synthetic", "instruct", "finetune", "test",
     ], help="Run a specific stage")
     args = parser.parse_args()
@@ -1126,6 +1154,7 @@ def main():
         "classifiers": stage_train_classifiers,
         "quality":     stage_quality_score,
         "dedup":       stage_minhash_dedup,
+        "augment":      stage_augment,
         "tokenizer":   stage_train_tokenizer,
         "shards":      stage_mix_and_shard,
         "pretrain":    stage_pretrain,
