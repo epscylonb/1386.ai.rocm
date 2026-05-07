@@ -66,7 +66,8 @@ def stage_cleanup():
     freed = 0
     if CKPT_DIR.exists():
         for pattern in ["1.1_step_*.pt", "1.1_ft_step_*.pt"]:
-            ckpts = list(CKPT_DIR.glob(pattern))
+            ckpts = sorted(CKPT_DIR.glob(pattern),
+                           key=lambda p: int(p.stem.split("_")[-1]))
             if ckpts:
                 for ckpt in ckpts:
                     freed += ckpt.stat().st_size
@@ -746,7 +747,8 @@ def stage_pretrain():
     CKPT_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-    ckpts = sorted(CKPT_DIR.glob("1.1_step_*.pt"))
+    ckpts = sorted(CKPT_DIR.glob("1.1_step_*.pt"),
+                   key=lambda p: int(p.stem.split("_")[-1]))
     if ckpts:
         resume_from = ckpts[-1]
         print(f"Resuming from: {resume_from}")
@@ -771,7 +773,8 @@ def stage_pretrain():
         shutil.copy2(str(final), str(pretrain_ckpt))
         print(f"\nPretrain checkpoint: {pretrain_ckpt}")
     else:
-        ckpts = sorted(CKPT_DIR.glob("1.1_step_*.pt"))
+        ckpts = sorted(CKPT_DIR.glob("1.1_step_*.pt"),
+                       key=lambda p: int(p.stem.split("_")[-1]))
         if ckpts:
             shutil.copy2(str(ckpts[-1]), str(pretrain_ckpt))
             print(f"\nUsing latest: {ckpts[-1]} -> {pretrain_ckpt}")
@@ -1000,7 +1003,8 @@ def stage_finetune():
         print("ERROR: No pretrain checkpoint!")
         sys.exit(1)
 
-    ft_ckpts = sorted(CKPT_DIR.glob("1.1_ft_step_*.pt"))
+    ft_ckpts = sorted(CKPT_DIR.glob("1.1_ft_step_*.pt"),
+                      key=lambda p: int(p.stem.split("_")[-1]))
     if ft_ckpts:
         resume = ft_ckpts[-1]
         print(f"Resuming finetune from: {resume}")
@@ -1022,7 +1026,8 @@ def stage_finetune():
         shutil.copy2(str(final), str(finetune_ckpt))
         print(f"\nFinetune checkpoint: {finetune_ckpt}")
     else:
-        ft_ckpts = sorted(CKPT_DIR.glob("1.1_ft_step_*.pt"))
+        ft_ckpts = sorted(CKPT_DIR.glob("1.1_ft_step_*.pt"),
+                         key=lambda p: int(p.stem.split("_")[-1]))
         if ft_ckpts:
             shutil.copy2(str(ft_ckpts[-1]), str(finetune_ckpt))
 
